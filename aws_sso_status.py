@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, json, subprocess, datetime, shutil
+import os, json, subprocess, datetime, shutil, configparser
 import rumps
 from AppKit import NSApplication, NSApplicationActivationPolicyProhibited
 from pathlib import Path
@@ -12,6 +12,7 @@ NSApplication.sharedApplication().setActivationPolicy_(
 
 
 CACHE_DIR = Path("~/.aws/sso/cache").expanduser()
+ACTIVE_PROFILE_FILE = Path("~/.aws/sso/active_profile").expanduser()
 EXPIRY_WARNING_MINUTES = 10
 CHECK_INTERVAL_SECONDS = 60
 LOCAL_TZ = zoneinfo.ZoneInfo("America/Toronto")
@@ -28,6 +29,56 @@ if not os.path.exists(AWS_CLI):
     AWS_CLI = None
 
 
+def discover_sso_profiles():
+    """Parse ~/.aws/config and return list of SSO-enabled profile names."""
+    config_path = Path("~/.aws/config").expanduser()
+    if not config_path.exists():
+        return ["default"]
+
+    try:
+        config = configparser.ConfigParser()
+        config.read(config_path)
+
+        profiles = []
+        for section in config.sections():
+            # Section names are like "profile myprofile" or "default"
+            if section == "default":
+                profile_name = "default"
+            elif section.startswith("profile "):
+                profile_name = section[8:]  # Remove "profile " prefix
+            else:
+                continue
+
+            # Check if profile has SSO configuration
+            if config.has_option(section, "sso_start_url") or config.has_option(
+                section, "sso_session"
+            ):
+                profiles.append(profile_name)
+
+        return profiles if profiles else ["default"]
+    except Exception:
+        return ["default"]
+
+
+def load_active_profile():
+    """Load the active profile from persistent storage."""
+    if ACTIVE_PROFILE_FILE.exists():
+        try:
+            return ACTIVE_PROFILE_FILE.read_text().strip()
+        except Exception:
+            pass
+    return "default"
+
+
+def save_active_profile(profile_name):
+    """Save the active profile to persistent storage."""
+    try:
+        ACTIVE_PROFILE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        ACTIVE_PROFILE_FILE.write_text(profile_name)
+    except Exception:
+        pass
+
+
 def find_latest_sso_cache():
     files = list(CACHE_DIR.glob("*.json"))
     if not files:
@@ -35,8 +86,8 @@ def find_latest_sso_cache():
     return max(files, key=lambda f: f.stat().st_mtime)
 
 
-def read_expiry_from_cache():
-    """Read expiry timestamp from ~/.aws/cli/cache."""
+def read_expiry_from_cache(profile=None):
+    """Read expiry timestamp from ~/.aws/cli/cache for given profile."""
     cli_cache = Path("~/.aws/cli/cache").expanduser()
     files = list(cli_cache.glob("*.json"))
     if not files:
@@ -55,15 +106,15 @@ def read_expiry_from_cache():
         return None
 
 
-def is_logged_in():
+def is_logged_in(profile=None):
+    """Check if the given profile has valid AWS credentials."""
     if not AWS_CLI:
         return False
     try:
-        subprocess.run(
-            [AWS_CLI, "sts", "get-caller-identity"],
-            capture_output=True,
-            check=True,
-        )
+        cmd = [AWS_CLI, "sts", "get-caller-identity"]
+        if profile and profile != "default":
+            cmd.extend(["--profile", profile])
+        subprocess.run(cmd, capture_output=True, check=True)
         return True
     except subprocess.CalledProcessError:
         return False
@@ -73,17 +124,30 @@ class AWSSSOStatusApp(rumps.App):
     def __init__(self):
         super().__init__("✕", icon=None, quit_button=None)
 
-        # Static header label
-        self.header_item = rumps.MenuItem("AWS SSO Login", callback=lambda _: None)
+        # Profile management
+        self.profiles = discover_sso_profiles()
+        self.active_profile = load_active_profile()
+
+        # Dynamic header label
+        self.header_item = rumps.MenuItem(
+            "AWS SSO not logged in", callback=lambda _: None
+        )
 
         # Menu items
         self.expires_item = rumps.MenuItem("Expires at: —", callback=lambda _: None)
         self.timeleft_item = rumps.MenuItem("Time left: —", callback=lambda _: None)
-        self.refresh_item = rumps.MenuItem("Refresh now")
+
+        # Create refresh submenu with profile options
+        self.refresh_item = rumps.MenuItem("Refresh profile...")
+        for profile in self.profiles:
+            profile_item = rumps.MenuItem(
+                profile, callback=lambda sender: self.refresh_profile(sender.title)
+            )
+            self.refresh_item.add(profile_item)
+
         self.quit_item = rumps.MenuItem("Quit")
 
         # Bind callbacks
-        self.refresh_item.set_callback(self.refresh_now)
         self.quit_item.set_callback(self.quit_app)
 
         # Build menu
@@ -106,27 +170,44 @@ class AWSSSOStatusApp(rumps.App):
         # Initial update
         self.update_status(None)
 
-    def refresh_now(self, _):
-        """Trigger aws sso login and temporarily increase update frequency."""
+    def refresh_profile(self, profile):
+        """Trigger aws sso login for profile and temporarily increase update frequency."""
         if not AWS_CLI:
             rumps.alert("AWS SSO Status", "AWS CLI not found. Cannot refresh login.")
             return
+
+        # Set this profile as the active one
+        self.active_profile = profile
+        save_active_profile(profile)
 
         self.fast_mode = True
         self.timer.stop()
         self.timer.interval = self.fast_interval
         self.timer.start()
 
-        subprocess.Popen([AWS_CLI, "sso", "login"])
-        rumps.notification("AWS SSO", "Logging in…", "Waiting for new credentials...")
+        # Build command with profile argument
+        cmd = [AWS_CLI, "sso", "login"]
+        if profile and profile != "default":
+            cmd.extend(["--profile", profile])
+
+        subprocess.Popen(cmd)
+        rumps.notification(
+            "AWS SSO", f"Logging in to {profile}…", "Waiting for new credentials..."
+        )
 
     def quit_app(self, _):
         rumps.quit_application()
 
     def update_status(self, _):
         now = datetime.datetime.now(LOCAL_TZ)
-        expiry = read_expiry_from_cache()
-        logged_in = is_logged_in()
+        expiry = read_expiry_from_cache(self.active_profile)
+        logged_in = is_logged_in(self.active_profile)
+
+        # Update header based on login status
+        if logged_in and expiry:
+            self.header_item.title = f"AWS SSO profile: {self.active_profile}"
+        else:
+            self.header_item.title = "AWS SSO not logged in"
 
         if not expiry:
             self.title = "✕"
@@ -169,7 +250,7 @@ class AWSSSOStatusApp(rumps.App):
         self.expires_item.title = f"Expires {expiry_str}"
         self.timeleft_item.title = f"Time left: {timeleft_str}"
 
-        # If in fast mode, and we’ve confirmed a valid login → go back to slow cadence
+        # If in fast mode, and we've confirmed a valid login → go back to slow cadence
         if self.fast_mode and logged_in:
             self.fast_mode = False
             self.timer.stop()
