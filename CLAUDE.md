@@ -49,7 +49,7 @@ Note: Running directly will show the menu bar app immediately. Use Cmd+Q to quit
 Located in `aws_sso_status.py`:
 - `CHECK_INTERVAL_SECONDS = 60`: Normal polling interval for status checks
 - `EXPIRY_WARNING_MINUTES = 10`: Threshold for warning icon display
-- `LOCAL_TZ = zoneinfo.ZoneInfo("America/Toronto")`: Timezone for display formatting
+- `LOCAL_TZ`: Automatically detected from system timezone for display formatting
 - `CACHE_DIR = Path("~/.aws/sso/cache").expanduser()`: Legacy location (note: code actually reads from `~/.aws/cli/cache`)
 - `ACTIVE_PROFILE_FILE = Path("~/.aws/sso/active_profile").expanduser()`: Stores the currently selected profile name
 

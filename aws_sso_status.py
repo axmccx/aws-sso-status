@@ -15,7 +15,8 @@ CACHE_DIR = Path("~/.aws/sso/cache").expanduser()
 ACTIVE_PROFILE_FILE = Path("~/.aws/sso/active_profile").expanduser()
 EXPIRY_WARNING_MINUTES = 10
 CHECK_INTERVAL_SECONDS = 60
-LOCAL_TZ = zoneinfo.ZoneInfo("America/Toronto")
+# Automatically detect local timezone from system
+LOCAL_TZ = datetime.datetime.now().astimezone().tzinfo
 
 # Try to locate AWS CLI binary
 AWS_CLI = shutil.which("aws") or "/usr/local/bin/aws"  # fallback

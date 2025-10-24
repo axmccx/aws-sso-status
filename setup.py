@@ -8,7 +8,7 @@ OPTIONS = {
     "plist": {
         "LSUIElement": True,
         "CFBundleName": "AWS SSO Status",
-        "CFBundleIdentifier": "com.example.aws-sso-status",
+        "CFBundleIdentifier": "io.github.axmccx.aws-sso-status",
         "CFBundleShortVersionString": "1.0.0",
     },
 }
