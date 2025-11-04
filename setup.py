@@ -4,7 +4,7 @@ APP = ["aws_sso_status.py"]
 OPTIONS = {
     "argv_emulation": False,
     "includes": ["imp", "jaraco.text"],
-    "packages": ["rumps", "zoneinfo"],
+    "packages": ["rumps"],
     "plist": {
         "LSUIElement": True,
         "CFBundleName": "AWS SSO Status",

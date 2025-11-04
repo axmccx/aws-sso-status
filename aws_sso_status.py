@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-import os, json, subprocess, datetime, shutil, configparser
+import subprocess, datetime, shutil, configparser
 import rumps
 from AppKit import NSApplication, NSApplicationActivationPolicyProhibited
 from pathlib import Path
-import zoneinfo
 
 # Hide Dock icon:
 NSApplication.sharedApplication().setActivationPolicy_(
@@ -11,16 +10,17 @@ NSApplication.sharedApplication().setActivationPolicy_(
 )
 
 
-CACHE_DIR = Path("~/.aws/sso/cache").expanduser()
-ACTIVE_PROFILE_FILE = Path("~/.aws/sso/active_profile").expanduser()
+ACTIVE_PROFILE_FILE = Path("~/.aws-sso-status/active_profile").expanduser()
+LOGIN_TIMESTAMP_DIR = Path("~/.aws-sso-status").expanduser()
+SESSION_DURATION_HOURS = 8
 EXPIRY_WARNING_MINUTES = 10
 CHECK_INTERVAL_SECONDS = 60
-# Automatically detect local timezone from system
-LOCAL_TZ = datetime.datetime.now().astimezone().tzinfo
+AGGRESSIVE_CHECK_INTERVAL_SECONDS = 30
+AGGRESSIVE_CHECK_THRESHOLD_MINUTES = 5
 
 # Try to locate AWS CLI binary
 AWS_CLI = shutil.which("aws") or "/usr/local/bin/aws"  # fallback
-if not os.path.exists(AWS_CLI):
+if not Path(AWS_CLI).exists():
     # Handle when AWS CLI not found at all
     rumps.alert(
         "AWS SSO Status",
@@ -80,31 +80,39 @@ def save_active_profile(profile_name):
         pass
 
 
-def find_latest_sso_cache():
-    files = list(CACHE_DIR.glob("*.json"))
-    if not files:
-        return None
-    return max(files, key=lambda f: f.stat().st_mtime)
+def get_login_timestamp_file(profile):
+    return LOGIN_TIMESTAMP_DIR / f".login_timestamp_{profile}"
 
 
-def read_expiry_from_cache(profile=None):
-    """Read expiry timestamp from ~/.aws/cli/cache for given profile."""
-    cli_cache = Path("~/.aws/cli/cache").expanduser()
-    files = list(cli_cache.glob("*.json"))
-    if not files:
-        return None
-    latest = max(files, key=lambda f: f.stat().st_mtime)
+def save_login_timestamp(profile):
     try:
-        with open(latest) as f:
-            data = json.load(f)
-        exp = data.get("Credentials", {}).get("Expiration")
-        if not exp:
-            return None
-        utc_dt = datetime.datetime.strptime(exp, "%Y-%m-%dT%H:%M:%SZ")
-        utc_dt = utc_dt.replace(tzinfo=datetime.timezone.utc)
-        return utc_dt.astimezone(LOCAL_TZ)
+        LOGIN_TIMESTAMP_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp_file = get_login_timestamp_file(profile)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        timestamp_file.write_text(now.isoformat())
     except Exception:
+        pass
+
+
+def load_login_timestamp(profile):
+    """Load the login timestamp for a profile."""
+    try:
+        timestamp_file = get_login_timestamp_file(profile)
+        if timestamp_file.exists():
+            timestamp_str = timestamp_file.read_text().strip()
+            return datetime.datetime.fromisoformat(timestamp_str)
+    except Exception:
+        pass
+    return None
+
+
+def calculate_session_expiry(profile):
+    """Calculate session expiry based on stored login timestamp."""
+    login_time = load_login_timestamp(profile)
+    if not login_time:
         return None
+    expiry = login_time + datetime.timedelta(hours=SESSION_DURATION_HOURS)
+    return expiry.astimezone()
 
 
 def is_logged_in(profile=None):
@@ -162,8 +170,10 @@ class AWSSSOStatusApp(rumps.App):
         ]
         # Timer setup
         self.normal_interval = CHECK_INTERVAL_SECONDS
+        self.aggressive_interval = AGGRESSIVE_CHECK_INTERVAL_SECONDS
         self.fast_interval = 1
         self.fast_mode = False
+        self.aggressive_mode = False
 
         self.timer = rumps.Timer(self.update_status, self.normal_interval)
         self.timer.start()
@@ -200,9 +210,23 @@ class AWSSSOStatusApp(rumps.App):
         rumps.quit_application()
 
     def update_status(self, _):
-        now = datetime.datetime.now(LOCAL_TZ)
-        expiry = read_expiry_from_cache(self.active_profile)
+        now = datetime.datetime.now().astimezone()
+        expiry = calculate_session_expiry(self.active_profile)
+
+        # Check actual login status
         logged_in = is_logged_in(self.active_profile)
+
+        # If in fast mode and we've confirmed a valid login, save timestamp and exit fast mode
+        if self.fast_mode and logged_in:
+            save_login_timestamp(self.active_profile)
+            expiry = calculate_session_expiry(self.active_profile)
+            self.fast_mode = False
+            self.timer.stop()
+            self.timer.interval = self.normal_interval
+            self.timer.start()
+            rumps.notification(
+                "AWS SSO", "Login confirmed", "Session refreshed successfully."
+            )
 
         # Update header based on login status
         if logged_in and expiry:
@@ -210,22 +234,43 @@ class AWSSSOStatusApp(rumps.App):
         else:
             self.header_item.title = "AWS SSO not logged in"
 
-        if not expiry:
+        # If no expiry or not logged in, show inactive state
+        if not expiry or not logged_in:
             self.title = "✕"
             self.expires_item.title = "Expires at: —"
             self.timeleft_item.title = "Time left: —"
+            # Reset to normal interval
+            if not self.fast_mode:
+                self.aggressive_mode = False
+                if self.timer.interval != self.normal_interval:
+                    self.timer.stop()
+                    self.timer.interval = self.normal_interval
+                    self.timer.start()
             return
 
+        # Calculate time remaining
         delta = expiry - now
         total_minutes = int(delta.total_seconds() / 60)
         hours = total_minutes // 60
         minutes = total_minutes % 60
-        warning = total_minutes < 60
+
+        # Determine if we should use aggressive checking (< 5 minutes left)
+        if total_minutes <= AGGRESSIVE_CHECK_THRESHOLD_MINUTES and not self.fast_mode:
+            if not self.aggressive_mode:
+                self.aggressive_mode = True
+                self.timer.stop()
+                self.timer.interval = self.aggressive_interval
+                self.timer.start()
+        elif self.aggressive_mode and total_minutes > AGGRESSIVE_CHECK_THRESHOLD_MINUTES:
+            self.aggressive_mode = False
+            self.timer.stop()
+            self.timer.interval = self.normal_interval
+            self.timer.start()
 
         # Choose icon
-        if total_minutes <= 0 or not logged_in:
+        if total_minutes <= 0:
             icon = "✕"
-        elif warning:
+        elif total_minutes < EXPIRY_WARNING_MINUTES:
             icon = "⚠"
         else:
             icon = "✓"
@@ -250,16 +295,6 @@ class AWSSSOStatusApp(rumps.App):
 
         self.expires_item.title = f"Expires {expiry_str}"
         self.timeleft_item.title = f"Time left: {timeleft_str}"
-
-        # If in fast mode, and we've confirmed a valid login → go back to slow cadence
-        if self.fast_mode and logged_in:
-            self.fast_mode = False
-            self.timer.stop()
-            self.timer.interval = self.normal_interval
-            self.timer.start()
-            rumps.notification(
-                "AWS SSO", "Login confirmed", "Session refreshed successfully."
-            )
 
 
 if __name__ == "__main__":
