@@ -31,3 +31,7 @@ dist/
 
 # py2app
 *.dmg
+
+# uv artifacts (if someone experiments with uv locally, don't commit)
+pyproject.toml
+uv.lock

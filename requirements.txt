@@ -1,4 +1,5 @@
-rumps
-setuptools
-macholib
-modulegraph
+rumps>=0.4.0
+setuptools>=69.0,<70
+macholib>=1.16.4
+modulegraph>=0.19.7
+py2app>=0.28.9

@@ -27,8 +27,15 @@ The app uses `rumps` (Ridiculously Uncomplicated macOS Python Statusbar apps) fo
 ## Development Commands
 
 ### Environment setup
+
+**Important:** py2app requires a framework build of Python. Install via Homebrew:
 ```bash
-python3.11 -m venv venv
+brew install python@3.11
+```
+
+Then create the virtual environment using the Homebrew Python:
+```bash
+/opt/homebrew/bin/python3.11 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 ```
@@ -80,10 +87,15 @@ The app tracks session expiry using a simple 8-hour timer:
 ## Key Dependencies
 
 - `rumps`: Menu bar app framework
-- `py2app`: macOS app bundler
+- `py2app`: macOS app bundler (0.28.9+)
+- `setuptools`: **Must be < 70** (69.x recommended) - newer versions dropped support for legacy setup.py builds
 - `AppKit`: Used to hide Dock icon via `NSApplicationActivationPolicyProhibited`
 - AWS CLI: Must be installed and accessible (via `which aws` or `/usr/local/bin/aws`)
 - `configparser`: Used to parse `~/.aws/config` for profile discovery
+
+**Important:** This project uses the classic `setup.py py2app` build approach, which requires setuptools < 70. The version constraint is pinned in `requirements.txt`.
+
+**Do NOT create a pyproject.toml file** - py2app is incompatible with modern PEP 621 dependency declarations. The presence of `pyproject.toml` with a `[project]` section will cause the build to fail with "install_requires is no longer supported".
 
 ## Testing Considerations
 
